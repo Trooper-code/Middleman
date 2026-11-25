@@ -339,6 +339,17 @@ internal static class MessagesPatches
         }
     }
 
+    /// <summary>
+    /// Prevents a dealer from starting a new customer drop while heading to or waiting at a meetup.
+    /// Contracts remain in Dealer.ActiveContracts and resume once the meetup ends.
+    /// </summary>
+    [HarmonyPatch(typeof(Dealer), "CheckAttendStart")]
+    [HarmonyPrefix]
+    private static bool DealerCheckAttendStart_Prefix(Dealer __instance)
+    {
+        return !DealerMeetupManager.HasActiveMeetup(__instance);
+    }
+
     private static Dealer? FindDealerForConversation(MSGConversation conversation)
     {
         var allDealers = Dealer.AllPlayerDealers;

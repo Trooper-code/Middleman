@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
+using HarmonyLib;
 using UnityEngine;
 #if IL2CPP
 using Il2CppFishNet;
@@ -33,6 +35,14 @@ internal static class DealerMeetupManager
     private const float ArrivalDistance = 2.5f;
     private const float UpdateIntervalSeconds = 0.5f;
     private const float RepathIntervalSeconds = 3f;
+    private const int MaxPathingFailuresBeforeWarp = 3;
+    private const string SpeedControlId = "middleman_meetup";
+
+    private static readonly FieldInfo? DealerCurrentContractField =
+        AccessTools.Field(typeof(Dealer), "currentContract");
+
+    private static readonly PropertyInfo? DealerCurrentContractProp =
+        AccessTools.Property(typeof(Dealer), "currentContract");
 
     private sealed class ActiveMeetup
     {
@@ -40,6 +50,8 @@ internal static class DealerMeetupManager
         public Property TargetProperty { get; }
         public Vector3 Destination { get; }
         public bool HasArrived { get; set; }
+        public bool HasAttemptedMove { get; set; }
+        public int PathingFailures { get; set; }
         public float NextRepathTime { get; set; }
         public int ArrivalTotalMins { get; set; }
 
@@ -117,7 +129,7 @@ internal static class DealerMeetupManager
         ActiveMeetup meetup = new(dealer, property, destination);
         ActiveMeetups[dealer.ID] = meetup;
 
-        bool busyWithDrop = IsAttendingDeal(dealer);
+        PauseActiveDealForMeetup(dealer);
 
         if (dealer.MSGConversation != null)
         {
@@ -126,17 +138,12 @@ internal static class DealerMeetupManager
                 notify: false);
 
             MessageChain reply = new();
-            reply.Messages.Add(busyWithDrop
-                ? $"I'm finishing a drop right now, boss. I'll head to {property.PropertyName} right after."
-                : $"On my way to {property.PropertyName}, boss.");
+            reply.Messages.Add($"On my way to {property.PropertyName}, boss.");
             dealer.MSGConversation.SendMessageChain(reply, initialDelay: 0.5f, notify: false);
         }
 
-        if (!busyWithDrop)
-        {
-            BeginWalk(meetup);
-        }
-
+        BeginWalk(meetup);
+        MiddlemanMod.Log.Msg($"Meetup started: {dealer.FullName} -> {property.PropertyName} ({destination})");
         MiddlemanController.Notify("Middleman", $"{dealer.FullName} is heading to {property.PropertyName}.");
     }
 
@@ -155,7 +162,8 @@ internal static class DealerMeetupManager
             return;
         }
 
-        RestoreSchedule(dealer);
+        RestoreNormalState(dealer);
+        MiddlemanMod.Log.Msg($"Meetup cancelled for {dealer.FullName}.");
 
         if (sendChat && dealer.MSGConversation != null)
         {
@@ -204,12 +212,12 @@ internal static class DealerMeetupManager
             ActiveMeetups.Remove(id);
             if (GameCompat.IsAlive(dealer))
             {
-                RestoreSchedule(dealer);
+                RestoreNormalState(dealer);
             }
             return;
         }
 
-        if (IsAttendingDeal(dealer) || IsInDialogue(dealer))
+        if (IsInDialogue(dealer))
         {
             return;
         }
@@ -227,27 +235,27 @@ internal static class DealerMeetupManager
         {
             if (distance <= ArrivalDistance)
             {
-                meetup.HasArrived = true;
-                meetup.ArrivalTotalMins = NetworkSingleton<TimeManager>.InstanceExists
-                    ? NetworkSingleton<TimeManager>.Instance.GetTotalMinSum()
-                    : 0;
-                dealer.Movement.Stop();
-
-                if (dealer.MSGConversation != null)
-                {
-                    MessageChain arrived = new();
-                    arrived.Messages.Add($"I'm at {meetup.TargetProperty.PropertyName}, boss.");
-                    dealer.MSGConversation.SendMessageChain(arrived, initialDelay: 0f, notify: true);
-                }
-
-                MiddlemanController.Notify("Middleman", $"{dealer.FullName} arrived at {meetup.TargetProperty.PropertyName}.");
+                CompleteArrival(meetup);
                 return;
+            }
+
+            EnsureJogSpeed(dealer);
+
+            if (!dealer.Movement.IsMoving && meetup.HasAttemptedMove && Time.time >= meetup.NextRepathTime)
+            {
+                meetup.PathingFailures++;
+                if (meetup.PathingFailures >= MaxPathingFailuresBeforeWarp)
+                {
+                    MiddlemanMod.Log.Warning($"{dealer.FullName} could not path to {meetup.TargetProperty.PropertyName}; warping to meet spot.");
+                    dealer.Movement.Warp(meetup.Destination);
+                    CompleteArrival(meetup);
+                    return;
+                }
             }
 
             if (!dealer.Movement.IsMoving || Time.time >= meetup.NextRepathTime)
             {
-                dealer.Movement.SetDestination(meetup.Destination);
-                meetup.NextRepathTime = Time.time + RepathIntervalSeconds;
+                TrySetMeetupDestination(meetup);
             }
 
             return;
@@ -269,7 +277,8 @@ internal static class DealerMeetupManager
             if (elapsed >= waitMinutes)
             {
                 ActiveMeetups.Remove(id);
-                RestoreSchedule(dealer);
+                RestoreNormalState(dealer);
+                MiddlemanMod.Log.Msg($"Meetup timed out for {dealer.FullName}; returning to schedule.");
             }
         }
     }
@@ -284,10 +293,95 @@ internal static class DealerMeetupManager
             dealer.ExitBuilding();
         }
 
+        EnsureJogSpeed(dealer);
+
         if (!IsInDialogue(dealer))
         {
-            dealer.Movement.SetDestination(meetup.Destination);
-            meetup.NextRepathTime = Time.time + RepathIntervalSeconds;
+            TrySetMeetupDestination(meetup);
+        }
+    }
+
+    private static void TrySetMeetupDestination(ActiveMeetup meetup)
+    {
+        Dealer dealer = meetup.Dealer;
+        if (!dealer.Movement.CanMove)
+        {
+            meetup.NextRepathTime = Time.time + 1f;
+            return;
+        }
+
+        Vector3 target = meetup.Destination;
+        if (dealer.Movement.GetClosestReachablePoint(meetup.Destination, out Vector3 reachable))
+        {
+            target = reachable;
+        }
+        else
+        {
+            meetup.PathingFailures++;
+        }
+
+        dealer.Movement.SetDestination(target);
+        meetup.HasAttemptedMove = true;
+        meetup.NextRepathTime = Time.time + RepathIntervalSeconds;
+    }
+
+    private static void CompleteArrival(ActiveMeetup meetup)
+    {
+        Dealer dealer = meetup.Dealer;
+        meetup.HasArrived = true;
+        meetup.ArrivalTotalMins = NetworkSingleton<TimeManager>.InstanceExists
+            ? NetworkSingleton<TimeManager>.Instance.GetTotalMinSum()
+            : 0;
+
+        RemoveJogSpeed(dealer);
+        dealer.Movement.Stop();
+
+        if (dealer.MSGConversation != null)
+        {
+            MessageChain arrived = new();
+            arrived.Messages.Add($"I'm at {meetup.TargetProperty.PropertyName}, boss.");
+            dealer.MSGConversation.SendMessageChain(arrived, initialDelay: 0f, notify: true);
+        }
+
+        MiddlemanMod.Log.Msg($"Meetup arrived: {dealer.FullName} at {meetup.TargetProperty.PropertyName}.");
+        MiddlemanController.Notify("Middleman", $"{dealer.FullName} arrived at {meetup.TargetProperty.PropertyName}.");
+    }
+
+    private static void PauseActiveDealForMeetup(Dealer dealer)
+    {
+        if (GameCompat.IsAlive(dealer.Behaviour))
+        {
+            DealerAttendDealBehaviour? attend = dealer.Behaviour.GetBehaviour<DealerAttendDealBehaviour>();
+            if (GameCompat.IsAlive(attend) && attend!.Active)
+            {
+                attend.Disable_Server();
+            }
+        }
+
+        // Clear currentContract without clearing Contract.Dealer so ActiveContracts stays queued for after the meetup.
+        if (DealerCurrentContractField != null)
+        {
+            DealerCurrentContractField.SetValue(dealer, null);
+        }
+        else if (DealerCurrentContractProp != null && DealerCurrentContractProp.CanWrite)
+        {
+            DealerCurrentContractProp.SetValue(dealer, null);
+        }
+    }
+
+    private static void EnsureJogSpeed(Dealer dealer)
+    {
+        if (GameCompat.IsAlive(dealer.Movement) && dealer.Movement.SpeedController != null)
+        {
+            dealer.Movement.SpeedController.AddSpeedControl(SpeedControlId, 0.7f, 10);
+        }
+    }
+
+    private static void RemoveJogSpeed(Dealer dealer)
+    {
+        if (GameCompat.IsAlive(dealer.Movement) && dealer.Movement.SpeedController != null)
+        {
+            dealer.Movement.SpeedController.RemoveSpeedControl(SpeedControlId);
         }
     }
 
@@ -306,8 +400,10 @@ internal static class DealerMeetupManager
         }
     }
 
-    private static void RestoreSchedule(Dealer dealer)
+    private static void RestoreNormalState(Dealer dealer)
     {
+        RemoveJogSpeed(dealer);
+
         if (GameCompat.IsAlive(dealer.HomeEvent))
         {
             dealer.HomeEvent.gameObject.SetActive(true);
@@ -319,17 +415,6 @@ internal static class DealerMeetupManager
         {
             dealer.Behaviour.ScheduleManager.EnableSchedule();
         }
-    }
-
-    private static bool IsAttendingDeal(Dealer dealer)
-    {
-        if (!GameCompat.IsAlive(dealer.Behaviour))
-        {
-            return false;
-        }
-
-        DealerAttendDealBehaviour? attend = dealer.Behaviour.GetBehaviour<DealerAttendDealBehaviour>();
-        return GameCompat.IsAlive(attend) && attend!.Active;
     }
 
     private static bool IsInDialogue(Dealer dealer)
