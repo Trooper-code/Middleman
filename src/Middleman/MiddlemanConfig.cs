@@ -14,6 +14,7 @@ internal static class MiddlemanConfig
     public static MelonPreferences_Entry<bool> ShowNotifications { get; private set; } = null!;
     public static MelonPreferences_Entry<bool> AllowDealerMeetups { get; private set; } = null!;
     public static MelonPreferences_Entry<int> DealerMeetupWaitMinutes { get; private set; } = null!;
+    public static MelonPreferences_Entry<bool> AutoDismissAfterMeetup { get; private set; } = null!;
 
     public static void Initialize()
     {
@@ -42,5 +43,11 @@ internal static class MiddlemanConfig
             360,
             display_name: "Dealer Meetup Wait (In-Game Minutes)",
             description: "How many in-game minutes a dealer waits at your property after arriving before heading back.");
+
+        AutoDismissAfterMeetup = _category.CreateEntry(
+            "AutoDismissAfterMeetup",
+            true,
+            display_name: "Auto-Dismiss After Meetup",
+            description: "Automatically send a dealer back to their drops after you talk or trade with them at your property and walk away.");
     }
 }

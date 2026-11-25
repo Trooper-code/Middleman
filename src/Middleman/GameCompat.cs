@@ -2,6 +2,7 @@ using System;
 using UnityEngine;
 #if IL2CPP
 using Il2CppInterop.Runtime;
+using Il2CppInterop.Runtime.InteropTypes;
 using Il2CppScheduleOne.Messaging;
 using Il2CppAction = Il2CppSystem.Action;
 #else
@@ -44,4 +45,20 @@ internal static class GameCompat
     /// Null/destroyed check compatible with both Unity Mono and IL2CPP proxy objects.
     /// </summary>
     public static bool IsAlive(UnityEngine.Object? obj) => obj != null;
+
+#if IL2CPP
+    public static T? TryCast<T>(object? obj) where T : Il2CppObjectBase
+    {
+        if (obj is Il2CppObjectBase il2cppObj)
+        {
+            return il2cppObj.TryCast<T>();
+        }
+        return obj as T;
+    }
+#else
+    public static T? TryCast<T>(object? obj) where T : class
+    {
+        return obj as T;
+    }
+#endif
 }

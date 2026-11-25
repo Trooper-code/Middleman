@@ -8,9 +8,12 @@ using Il2CppFishNet;
 using Il2CppScheduleOne.DevUtilities;
 using Il2CppScheduleOne.Economy;
 using Il2CppScheduleOne.GameTime;
+using Il2CppScheduleOne.ItemFramework;
 using Il2CppScheduleOne.Messaging;
+using Il2CppScheduleOne.Money;
 using Il2CppScheduleOne.NPCs.Behaviour;
 using Il2CppScheduleOne.PlayerScripts;
+using Il2CppScheduleOne.Product;
 using Il2CppScheduleOne.Property;
 using Il2CppScheduleOne.UI.Phone.Messages;
 #else
@@ -18,9 +21,12 @@ using FishNet;
 using ScheduleOne.DevUtilities;
 using ScheduleOne.Economy;
 using ScheduleOne.GameTime;
+using ScheduleOne.ItemFramework;
 using ScheduleOne.Messaging;
+using ScheduleOne.Money;
 using ScheduleOne.NPCs.Behaviour;
 using ScheduleOne.PlayerScripts;
+using ScheduleOne.Product;
 using ScheduleOne.Property;
 using ScheduleOne.UI.Phone.Messages;
 #endif
@@ -33,6 +39,7 @@ namespace Middleman;
 internal static class DealerMeetupManager
 {
     private const float ArrivalDistance = 2.5f;
+    private const float AutoDismissDistance = 15f;
     private const float UpdateIntervalSeconds = 0.5f;
     private const float RepathIntervalSeconds = 3f;
     private const int MaxPathingFailuresBeforeWarp = 3;
@@ -50,6 +57,7 @@ internal static class DealerMeetupManager
         public Property TargetProperty { get; }
         public Vector3 Destination { get; }
         public bool HasArrived { get; set; }
+        public bool HasInteractedWithPlayer { get; set; }
         public bool HasAttemptedMove { get; set; }
         public int PathingFailures { get; set; }
         public float NextRepathTime { get; set; }
@@ -177,6 +185,86 @@ internal static class DealerMeetupManager
         }
     }
 
+    /// <summary>
+    /// Replies in the dealer's chat with their current cash, active drop count, and packaged product stock.
+    /// </summary>
+    public static void SendStatusReport(Dealer dealer)
+    {
+        if (!GameCompat.IsAlive(dealer) || !dealer.IsRecruited || dealer.MSGConversation == null)
+        {
+            return;
+        }
+
+        string cashText = MoneyManager.FormatAmount(dealer.Cash);
+        int activeCount = dealer.ActiveContracts != null ? dealer.ActiveContracts.Count : 0;
+        string dropsText = activeCount == 0
+            ? "no active drops"
+            : activeCount == 1 ? "1 active drop" : $"{activeCount} active drops";
+
+        Dictionary<string, int> stockTotals = new();
+        List<string> stockOrder = new();
+        var slots = dealer.GetAllSlots();
+        if (slots != null)
+        {
+            for (int i = 0; i < slots.Count; i++)
+            {
+                ItemSlot slot = slots[i];
+                if (slot == null || slot.ItemInstance == null || slot.Quantity <= 0)
+                {
+                    continue;
+                }
+
+                ProductItemInstance? prod = GameCompat.TryCast<ProductItemInstance>(slot.ItemInstance);
+                if (prod == null || !GameCompat.IsAlive(prod.AppliedPackaging))
+                {
+                    continue;
+                }
+
+                string name = GameCompat.IsAlive(prod.Definition) && !string.IsNullOrEmpty(prod.Definition.Name)
+                    ? prod.Definition.Name
+                    : prod.ID;
+
+                int units = slot.Quantity * prod.Amount;
+                if (units <= 0)
+                {
+                    continue;
+                }
+
+                if (!stockTotals.ContainsKey(name))
+                {
+                    stockTotals[name] = 0;
+                    stockOrder.Add(name);
+                }
+
+                stockTotals[name] += units;
+            }
+        }
+
+        string stockSummary;
+        if (stockOrder.Count == 0)
+        {
+            stockSummary = "Stock: empty.";
+        }
+        else
+        {
+            List<string> parts = new(stockOrder.Count);
+            for (int i = 0; i < stockOrder.Count; i++)
+            {
+                string name = stockOrder[i];
+                parts.Add($"{stockTotals[name]}x {name}");
+            }
+            stockSummary = $"Stock: {string.Join(", ", parts)}.";
+        }
+
+        dealer.MSGConversation.SendMessage(
+            new Message("What's your stock and cash looking like?", Message.ESenderType.Player, _endOfGroup: true),
+            notify: false);
+
+        MessageChain reply = new();
+        reply.Messages.Add($"Holding {cashText} cash, {dropsText}. {stockSummary}");
+        dealer.MSGConversation.SendMessageChain(reply, initialDelay: 0.5f, notify: false);
+    }
+
     public static void Update()
     {
         if (ActiveMeetups.Count == 0 || Time.time < _nextUpdateTime)
@@ -219,6 +307,10 @@ internal static class DealerMeetupManager
 
         if (IsInDialogue(dealer))
         {
+            if (meetup.HasArrived)
+            {
+                meetup.HasInteractedWithPlayer = true;
+            }
             return;
         }
 
@@ -267,6 +359,21 @@ internal static class DealerMeetupManager
             if (distToPlayer <= 6f)
             {
                 dealer.Movement.FacePoint(Player.Local.transform.position);
+            }
+            else if (MiddlemanConfig.AutoDismissAfterMeetup.Value
+                && meetup.HasInteractedWithPlayer
+                && distToPlayer >= AutoDismissDistance)
+            {
+                ActiveMeetups.Remove(id);
+                RestoreNormalState(dealer);
+                MiddlemanMod.Log.Msg($"Meetup auto-dismissed for {dealer.FullName} after player walked away.");
+                if (dealer.MSGConversation != null)
+                {
+                    MessageChain reply = new();
+                    reply.Messages.Add("Heading back to my drops, boss.");
+                    dealer.MSGConversation.SendMessageChain(reply, initialDelay: 0.5f, notify: false);
+                }
+                return;
             }
         }
 

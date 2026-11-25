@@ -33,6 +33,7 @@ internal static class MessagesPatches
     private const string PassAcceptedText = "[Pass deal to dealer]";
     private const string MeetAtPropertyText = "[Meet me at a property]";
     private const string HeadBackText = "[Head back]";
+    private const string CheckStatusText = "[Check stock & cash]";
 
     private static readonly HashSet<string> RegisteredConversations = new();
     private static readonly HashSet<string> RegisteredDealerConversations = new();
@@ -280,6 +281,14 @@ internal static class MessagesPatches
             && dealer!.IsRecruited
             && DealerMeetupManager.HasActiveMeetup(dealer));
         headBackSendable.onSelected = GameCompat.ToGameAction(() => DealerMeetupManager.CancelMeetup(dealer!, sendChat: true));
+
+        SendableMessage statusSendable = conversation.CreateSendableMessage(CheckStatusText);
+        statusSendable.disableDefaultSendBehaviour = true;
+        statusSendable.ShouldShowCheck = GameCompat.ToBoolCheck(_ =>
+            GameCompat.IsAlive(dealer)
+            && dealer!.IsRecruited
+            && dealer.IsConscious);
+        statusSendable.onSelected = GameCompat.ToGameAction(() => DealerMeetupManager.SendStatusReport(dealer!));
     }
 
     private static void ShowPropertyPicker(Dealer dealer, MSGConversation conversation)
