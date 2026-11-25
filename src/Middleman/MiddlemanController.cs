@@ -31,6 +31,14 @@ namespace Middleman;
 /// </summary>
 internal static class MiddlemanController
 {
+    private static readonly string[] CustomerConfirmationLines =
+    {
+        "Sounds good, I'll look out for them.",
+        "Works for me, see them there.",
+        "Cool, appreciate it.",
+        "Alright, I'll meet them there.",
+    };
+
     private static readonly MethodInfo? DealerAddContractMethod =
         AccessTools.Method(typeof(Dealer), "AddContract", new[] { typeof(Contract) });
 
@@ -95,12 +103,10 @@ internal static class MiddlemanController
         if (convo != null)
         {
             convo.ClearResponses(network: true);
-            convo.SendMessage(
-                new Message($"I'll have {dealer.FullName} handle this one.", Message.ESenderType.Player, _endOfGroup: true),
-                notify: false);
         }
 
         string customerName = customer.NPC?.FullName ?? "Customer";
+        SendHandoffMessages(convo, dealer, customerName);
         Notify("Middleman", $"Passed {customerName}'s deal to {dealer.FullName}.");
     }
 
@@ -153,15 +159,31 @@ internal static class MiddlemanController
         contract.HasChanged = true;
 
         MSGConversation? convo = customer.NPC?.MSGConversation;
-        if (convo != null)
+        string customerName = customer.NPC?.FullName ?? "Customer";
+        SendHandoffMessages(convo, dealer, customerName);
+        Notify("Middleman", $"Handed {customerName}'s active deal to {dealer.FullName}.");
+    }
+
+    private static void SendHandoffMessages(MSGConversation? customerConvo, Dealer dealer, string customerName)
+    {
+        if (customerConvo != null)
         {
-            convo.SendMessage(
-                new Message($"I'll have {dealer.FullName} handle this one.", Message.ESenderType.Player, _endOfGroup: true),
+            customerConvo.SendMessage(
+                new Message($"I'll have {dealer.FullName} take care of you.", Message.ESenderType.Player, _endOfGroup: true),
                 notify: false);
+
+            MessageChain reply = new MessageChain();
+            int index = UnityEngine.Random.Range(0, CustomerConfirmationLines.Length);
+            reply.Messages.Add(CustomerConfirmationLines[index]);
+            customerConvo.SendMessageChain(reply, initialDelay: 0.5f, notify: false);
         }
 
-        string customerName = customer.NPC?.FullName ?? "Customer";
-        Notify("Middleman", $"Handed {customerName}'s active deal to {dealer.FullName}.");
+        if (dealer.MSGConversation != null)
+        {
+            dealer.MSGConversation.SendMessage(
+                new Message($"Got it boss, I'll take care of {customerName}.", Message.ESenderType.Other, _endOfGroup: true),
+                notify: false);
+        }
     }
 
     private static DeliveryLocation? ResolveDeliveryLocation(ContractInfo info)

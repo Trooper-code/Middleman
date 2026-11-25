@@ -76,7 +76,7 @@ internal static class MessagesPatches
         }
 
         Customer? customer = FindCustomerForConversation(__instance);
-        if (!GameCompat.IsAlive(customer) || customer!.OfferedContractInfo == null)
+        if (!GameCompat.IsAlive(customer))
         {
             return;
         }
@@ -84,7 +84,7 @@ internal static class MessagesPatches
         Response passResponse = new Response(
             PassResponseText,
             PassResponseLabel,
-            GameCompat.ToGameAction(() => MiddlemanController.TryPassOfferedContract(customer)),
+            GameCompat.ToGameAction(() => MiddlemanController.TryPassOfferedContract(customer!)),
             _disableDefaultResponseBehaviour: true);
 
         _responses.Insert(acceptIndex + 1, passResponse);
@@ -132,25 +132,91 @@ internal static class MessagesPatches
     [HarmonyPostfix]
     private static void EnsureUIExists_Postfix(MSGConversation __instance)
     {
-        if (__instance == null || string.IsNullOrEmpty(__instance.ConversationId))
+        EnsureAcceptedDealSendable(__instance);
+    }
+
+    /// <summary>
+    /// Ensures existing conversations opened from a loaded save have both [Pass deal to dealer]
+    /// and (if an offer is pending) [Pass to Dealer].
+    /// </summary>
+    [HarmonyPatch(typeof(MSGConversation), nameof(MSGConversation.SetOpen))]
+    [HarmonyPrefix]
+    private static void SetOpen_Prefix(MSGConversation __instance, bool open)
+    {
+        if (!open || __instance == null)
         {
             return;
         }
 
-        if (RegisteredConversations.Contains(__instance.ConversationId))
+        EnsureAcceptedDealSendable(__instance);
+
+        GameResponseList? responses = __instance.currentResponses;
+        if (responses == null || responses.Count == 0)
+        {
+            return;
+        }
+
+        bool hasAccept = false;
+        bool hasPass = false;
+        for (int i = 0; i < responses.Count; i++)
+        {
+            Response r = responses[i];
+            if (r == null)
+            {
+                continue;
+            }
+
+            if (r.label == "ACCEPT_CONTRACT")
+            {
+                hasAccept = true;
+            }
+            else if (r.label == PassResponseLabel)
+            {
+                hasPass = true;
+            }
+        }
+
+        if (!hasAccept || hasPass)
         {
             return;
         }
 
         Customer? customer = FindCustomerForConversation(__instance);
+        if (!GameCompat.IsAlive(customer) || customer!.OfferedContractInfo == null)
+        {
+            return;
+        }
+
+        GameResponseList copy = new GameResponseList();
+        for (int i = 0; i < responses.Count; i++)
+        {
+            copy.Add(responses[i]);
+        }
+
+        __instance.ShowResponses(copy, 0f, network: false);
+    }
+
+    private static void EnsureAcceptedDealSendable(MSGConversation conversation)
+    {
+        if (conversation == null || string.IsNullOrEmpty(conversation.ConversationId))
+        {
+            return;
+        }
+
+        if (RegisteredConversations.Contains(conversation.ConversationId))
+        {
+            return;
+        }
+
+        Customer? customer = FindCustomerForConversation(conversation);
         if (!GameCompat.IsAlive(customer))
         {
             return;
         }
 
-        RegisteredConversations.Add(__instance.ConversationId);
+        RegisteredConversations.Add(conversation.ConversationId);
 
-        SendableMessage sendable = __instance.CreateSendableMessage(PassAcceptedText);
+        SendableMessage sendable = conversation.CreateSendableMessage(PassAcceptedText);
         sendable.disableDefaultSendBehaviour = true;
         sendable.ShouldShowCheck = GameCompat.ToBoolCheck(_ =>
             MiddlemanConfig.AllowPassingAcceptedDeals.Value
