@@ -8,6 +8,7 @@
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <DebugType Condition="'$(Configuration)' == 'Release'">none</DebugType>
     <SuppressTfmSupportBuildWarnings>true</SuppressTfmSupportBuildWarnings>
     <NoWarn>NU1603;NU1605;NU1701</NoWarn>
   </PropertyGroup>
