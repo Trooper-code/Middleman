@@ -244,7 +244,7 @@ internal static class MiddlemanController
         }
     }
 
-    private static void Notify(string title, string subtitle)
+    public static void Notify(string title, string subtitle)
     {
         MiddlemanMod.Log.Msg($"{title}: {subtitle}");
 

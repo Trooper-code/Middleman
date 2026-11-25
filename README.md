@@ -5,8 +5,9 @@ A lightweight MelonLoader mod for **Schedule I** that lets you pass customer dea
 ## Features
 - **`[Pass to Dealer]` on Deal Offers:** Whenever a customer texts you a deal offer (or accepts your counter-offer), a `[Pass to Dealer]` button appears right alongside Accept, Counter-offer, and Decline.
 - **Pass Already-Accepted Deals:** Open the **Compose** menu inside any customer's text thread while you have an active deal with them and choose **`[Pass deal to dealer]`**. The deal transfers to a dealer, clears from your personal quest tracker/map, and keeps its scheduled delivery window.
+- **Call Dealers to Your Properties:** Open any recruited dealer's text thread in Messages and pick **Compose → `[Meet me at a property]`** to choose any property you own. They'll walk over, text you when they arrive, and wait there so you can restock them or collect cash without hunting them down (use **Compose → `[Head back]`** to dismiss them early).
 - **Automatic Dealer Selection:** Automatically picks an eligible recruited dealer who is conscious and has enough packaged product of acceptable quality in their inventory (preferring the dealer with the fewest active deals, breaking ties by closest distance to the meet spot).
-- **Clear In-Game Feedback:** If no recruited dealer has the requested product in stock, the deal stays untouched and a plain-English phone notification tells you what's missing.
+- **Clear In-Game Feedback:** Confirmation replies appear in both the customer's and dealer's Messages threads. If no recruited dealer has the requested product in stock, the deal stays untouched and a plain-English phone notification tells you what's missing.
 - **Save-Safe & Cross-Runtime:** Never writes custom button data into save files. No S1API dependency required. Builds for both the normal **IL2CPP** Steam branch and the `alternate` **Mono** branch.
 
 ## Requirements
@@ -31,6 +32,8 @@ After launching once, a `[Middleman]` section is created in `<Schedule I>\UserDa
 |---------|---------|-------------|
 | `AllowPassingAcceptedDeals` | `true` | Show `[Pass deal to dealer]` in the Messages Compose menu for deals you already accepted |
 | `ShowNotifications` | `true` | Show phone toast notifications when a deal is handed off or when no dealer has stock |
+| `AllowDealerMeetups` | `true` | Show `[Meet me at a property]` and `[Head back]` in recruited dealers' Compose menus |
+| `DealerMeetupWaitMinutes` | `360` | How many in-game minutes a dealer waits at your property after arriving before heading back |
 
 ## Building from Source
 1. Install the **.NET 10 SDK** (or .NET 6+ SDK supporting `netstandard2.1` and `net6.0`).

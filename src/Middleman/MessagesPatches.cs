@@ -4,12 +4,14 @@ using HarmonyLib;
 using Il2CppScheduleOne.Economy;
 using Il2CppScheduleOne.Messaging;
 using Il2CppScheduleOne.Persistence.Datas;
+using Il2CppScheduleOne.Property;
 using Il2CppScheduleOne.Quests;
 using GameResponseList = Il2CppSystem.Collections.Generic.List<Il2CppScheduleOne.Messaging.Response>;
 #else
 using ScheduleOne.Economy;
 using ScheduleOne.Messaging;
 using ScheduleOne.Persistence.Datas;
+using ScheduleOne.Property;
 using ScheduleOne.Quests;
 using GameResponseList = System.Collections.Generic.List<ScheduleOne.Messaging.Response>;
 #endif
@@ -17,21 +19,28 @@ using GameResponseList = System.Collections.Generic.List<ScheduleOne.Messaging.R
 namespace Middleman;
 
 /// <summary>
-/// Harmony patches on MSGConversation to surface [Pass to Dealer] on deal offers
-/// and [Pass deal to dealer] in the Messages Compose menu for active deals.
+/// Harmony patches on MSGConversation and Dealer to surface:
+/// - [Pass to Dealer] on customer deal offers
+/// - [Pass deal to dealer] in customer Compose menus for active deals
+/// - [Meet me at a property] / [Head back] in recruited dealer Compose menus
 /// </summary>
 [HarmonyPatch]
 internal static class MessagesPatches
 {
     internal const string PassResponseLabel = "MIDDLEMAN_PASS";
+    private const string MeetupResponsePrefix = "MIDDLEMAN_MEETUP_";
     private const string PassResponseText = "[Pass to Dealer]";
     private const string PassAcceptedText = "[Pass deal to dealer]";
+    private const string MeetAtPropertyText = "[Meet me at a property]";
+    private const string HeadBackText = "[Head back]";
 
     private static readonly HashSet<string> RegisteredConversations = new();
+    private static readonly HashSet<string> RegisteredDealerConversations = new();
 
     public static void ResetState()
     {
         RegisteredConversations.Clear();
+        RegisteredDealerConversations.Clear();
     }
 
     /// <summary>
@@ -107,7 +116,9 @@ internal static class MessagesPatches
         for (int i = 0; i < __result.ActiveResponses.Length; i++)
         {
             TextResponseData entry = __result.ActiveResponses[i];
-            if (entry != null && entry.Label == PassResponseLabel)
+            if (entry != null
+                && !string.IsNullOrEmpty(entry.Label)
+                && (entry.Label == PassResponseLabel || entry.Label.StartsWith(MeetupResponsePrefix)))
             {
                 removed = true;
                 continue;
@@ -126,18 +137,19 @@ internal static class MessagesPatches
     }
 
     /// <summary>
-    /// Registers the [Pass deal to dealer] Compose option on each customer's conversation UI.
+    /// Registers Compose options on customer and recruited dealer conversations when UI is created.
     /// </summary>
     [HarmonyPatch(typeof(MSGConversation), nameof(MSGConversation.EnsureUIExists))]
     [HarmonyPostfix]
     private static void EnsureUIExists_Postfix(MSGConversation __instance)
     {
         EnsureAcceptedDealSendable(__instance);
+        EnsureDealerMeetupSendables(__instance);
     }
 
     /// <summary>
-    /// Ensures existing conversations opened from a loaded save have both [Pass deal to dealer]
-    /// and (if an offer is pending) [Pass to Dealer].
+    /// Ensures existing conversations opened from a loaded save have Compose options
+    /// and (if a customer offer is pending) [Pass to Dealer].
     /// </summary>
     [HarmonyPatch(typeof(MSGConversation), nameof(MSGConversation.SetOpen))]
     [HarmonyPrefix]
@@ -149,6 +161,7 @@ internal static class MessagesPatches
         }
 
         EnsureAcceptedDealSendable(__instance);
+        EnsureDealerMeetupSendables(__instance);
 
         GameResponseList? responses = __instance.currentResponses;
         if (responses == null || responses.Count == 0)
@@ -225,6 +238,135 @@ internal static class MessagesPatches
             && !GameCompat.IsAlive(customer.CurrentContract.Dealer)
             && customer.CurrentContract.State == EQuestState.Active);
         sendable.onSelected = GameCompat.ToGameAction(() => MiddlemanController.TryPassAcceptedContract(customer!));
+    }
+
+    private static void EnsureDealerMeetupSendables(MSGConversation conversation)
+    {
+        if (conversation == null || string.IsNullOrEmpty(conversation.ConversationId))
+        {
+            return;
+        }
+
+        if (RegisteredDealerConversations.Contains(conversation.ConversationId))
+        {
+            return;
+        }
+
+        Dealer? dealer = FindDealerForConversation(conversation);
+        if (!GameCompat.IsAlive(dealer))
+        {
+            return;
+        }
+
+        RegisteredDealerConversations.Add(conversation.ConversationId);
+
+        SendableMessage meetSendable = conversation.CreateSendableMessage(MeetAtPropertyText);
+        meetSendable.disableDefaultSendBehaviour = true;
+        meetSendable.ShouldShowCheck = GameCompat.ToBoolCheck(_ =>
+            MiddlemanConfig.AllowDealerMeetups.Value
+            && GameCompat.IsAlive(dealer)
+            && dealer!.IsRecruited
+            && dealer.IsConscious
+            && Property.OwnedProperties != null
+            && Property.OwnedProperties.Count > 0
+            && !DealerMeetupManager.HasActiveMeetup(dealer));
+        meetSendable.onSelected = GameCompat.ToGameAction(() => ShowPropertyPicker(dealer!, conversation));
+
+        SendableMessage headBackSendable = conversation.CreateSendableMessage(HeadBackText);
+        headBackSendable.disableDefaultSendBehaviour = true;
+        headBackSendable.ShouldShowCheck = GameCompat.ToBoolCheck(_ =>
+            MiddlemanConfig.AllowDealerMeetups.Value
+            && GameCompat.IsAlive(dealer)
+            && dealer!.IsRecruited
+            && DealerMeetupManager.HasActiveMeetup(dealer));
+        headBackSendable.onSelected = GameCompat.ToGameAction(() => DealerMeetupManager.CancelMeetup(dealer!, sendChat: true));
+    }
+
+    private static void ShowPropertyPicker(Dealer dealer, MSGConversation conversation)
+    {
+        if (!GameCompat.IsAlive(dealer) || conversation == null)
+        {
+            return;
+        }
+
+        var owned = Property.OwnedProperties;
+        if (owned == null || owned.Count == 0)
+        {
+            MiddlemanController.Notify("Middleman", "You don't own any properties yet.");
+            return;
+        }
+
+        GameResponseList options = new GameResponseList();
+        for (int i = 0; i < owned.Count; i++)
+        {
+            Property prop = owned[i];
+            if (!GameCompat.IsAlive(prop) || !prop.IsOwned)
+            {
+                continue;
+            }
+
+            string code = string.IsNullOrEmpty(prop.PropertyCode) ? i.ToString() : prop.PropertyCode;
+            options.Add(new Response(
+                prop.PropertyName,
+                MeetupResponsePrefix + code,
+                GameCompat.ToGameAction(() =>
+                {
+                    conversation.ClearResponses(network: false);
+                    DealerMeetupManager.RequestMeetup(dealer, prop);
+                }),
+                _disableDefaultResponseBehaviour: true));
+        }
+
+        options.Add(new Response(
+            "Nevermind",
+            MeetupResponsePrefix + "CANCEL",
+            GameCompat.ToGameAction(() => conversation.ClearResponses(network: false)),
+            _disableDefaultResponseBehaviour: true));
+
+        conversation.ShowResponses(options, 0f, network: false);
+    }
+
+    /// <summary>
+    /// Keeps Dealer.OnTick from re-enabling HomeEvent while a dealer is meeting the player at a property.
+    /// </summary>
+    [HarmonyPatch(typeof(Dealer), "OnTick")]
+    [HarmonyPostfix]
+    private static void DealerOnTick_Postfix(Dealer __instance)
+    {
+        if (DealerMeetupManager.HasActiveMeetup(__instance) && GameCompat.IsAlive(__instance.HomeEvent))
+        {
+            __instance.HomeEvent.gameObject.SetActive(false);
+        }
+    }
+
+    private static Dealer? FindDealerForConversation(MSGConversation conversation)
+    {
+        var allDealers = Dealer.AllPlayerDealers;
+        if (allDealers == null)
+        {
+            return null;
+        }
+
+        for (int i = 0; i < allDealers.Count; i++)
+        {
+            Dealer dealer = allDealers[i];
+            if (!GameCompat.IsAlive(dealer) || dealer.DealerData == null)
+            {
+                continue;
+            }
+
+            if (dealer.DealerData.DealerType != EDealerType.PlayerDealer)
+            {
+                continue;
+            }
+
+            if (dealer.MSGConversation != null && dealer.MSGConversation.ConversationId == conversation.ConversationId)
+            {
+                return dealer;
+            }
+        }
+
+        return null;
     }
 
     private static Customer? FindCustomerForConversation(MSGConversation conversation)

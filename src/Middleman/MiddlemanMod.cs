@@ -21,8 +21,14 @@ public sealed class MiddlemanMod : MelonMod
         LoggerInstance.Msg("Middleman v1.0.0 loaded.");
     }
 
+    public override void OnUpdate()
+    {
+        DealerMeetupManager.Update();
+    }
+
     public override void OnSceneWasUnloaded(int buildIndex, string sceneName)
     {
         MessagesPatches.ResetState();
+        DealerMeetupManager.ResetState();
     }
 }

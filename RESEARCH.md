@@ -30,3 +30,8 @@ Findings below are documented from inspecting Schedule I's Mono `Assembly-CSharp
   - `maxQuality = ItemQuality.ShiftQuality(customer.CustomerData.Standards.GetCorrespondingQuality(), Dealer.PositiveQualityTolerance)` (`+5`)
   - `GetAvailableProducts()` already subtracts quantities reserved by `Dealer.ActiveContracts`.
 - `DealerAttendDealBehaviour` handles the actual walk-up and handover via `Dealer.RemoveContractItems` and `Customer.OfferDealItems(items, offeredByPlayer: false, out accepted)`, and `Dealer.SubmitPayment` credits `Cash` minus `DealerData.SalesCutPercentage`.
+
+## Dealer Property Meetups (`Dealer`, `NPCScheduleManager`, `Property`)
+- `Property.OwnedProperties` holds every owned `Property`. `Property.NPCSpawnPoint` (falling back to `SpawnPoint` or `EmployeeIdlePoints[0]`) provides a reachable outdoor point at each property.
+- `Dealer.HomeEvent` (`NPCEvent_StayInBuilding`) is re-enabled every tick in `Dealer.OnTick()` (`HomeEvent.gameObject.SetActive(true)`). Disabling `Dealer.Behaviour.ScheduleManager.DisableSchedule()` and suppressing `HomeEvent` in a `Dealer.OnTick` postfix lets a dealer walk to a property via `NPCMovement.SetDestination(...)` and wait there without snapping back inside their home building.
+- While `DealerAttendDealBehaviour.Active` or `DialogueHandler.IsDialogueInProgress` is true, pausing meetup navigation updates lets the dealer finish customer handovers and player conversations cleanly before resuming or dismissing.
