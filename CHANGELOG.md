@@ -2,6 +2,14 @@
 
 All notable changes to **Middleman Mod** are documented here.
 
+## [1.1.0] - Unreleased
+### Added
+- **Co-op Multiplayer Support (`SteamNetworkLib` v1.6.0):** Non-host players in a Steam co-op lobby can now pass pending offers (`[Pass to Dealer]`), pass already-accepted deals (`[Pass deal to dealer]`), summon dealers (`[Meet me at a property]`), dismiss meetups (`[Head back]`), and check dealer stock/cash (`[Check stock & cash]`) directly from their own phone.
+- **Host-to-Client Sync & Feedback:** Routed outcome/error toast notifications back to the requesting player, synced accepted-deal dealer transfers (`CONTRACT_ASSIGNED`) so deals clear from every player's Journal/HUD/map, and synced active meetup state (`MEETUP_STATE` + `SYNC_STATE`) so `[Head back]` shows accurately for clients.
+
+### Fixed
+- **Multiplayer Dealer Meetup Proximity:** Updated `DealerMeetupManager` to check `Player.PlayerList` instead of `Player.Local` so summoned dealers face whichever player approaches them and only auto-dismiss once all players have walked away.
+
 ## [1.0.0] - 2026-11-25
 ### Added
 - **`[Pass to Dealer]` on Pending Offers:** Pass customer deal offers (and accepted counter-offers) directly to an auto-selected dealer from the Messages app, including pre-existing offers loaded from a save.

@@ -1,6 +1,6 @@
 # Middleman Mod for Schedule I
 
-A lightweight MelonLoader mod for **Schedule I** that lets you hand off customer deals to your recruited dealers and summon dealers straight to your properties—all inside the native in-game **Messages** phone app.
+A lightweight MelonLoader mod for **Schedule I** that lets you hand off customer deals to your recruited dealers and summon dealers straight to your properties—all inside the native in-game **Messages** phone app, in both single-player and co-op multiplayer.
 
 No extra phone apps, no S1API dependency, and completely save-safe.
 
@@ -13,6 +13,7 @@ No extra phone apps, no S1API dependency, and completely save-safe.
 - **Check Dealer Stock & Cash Remotely:** Open any recruited dealer's thread and pick **Compose → `[Check stock & cash]`** to have them text back their cash on hand, active drop count, and packaged product inventory.
 - **Out-of-Stock Protection:** If no recruited dealer has enough product in stock, the deal stays untouched and a plain-English notification tells you what's missing.
 - **Cross-Runtime & Save-Safe:** Custom buttons are stripped before saving so your save files stay 100% vanilla-compatible. Supports both **IL2CPP** (normal Steam branch) and **Mono** (`alternate` beta branch).
+- **Co-op Multiplayer Support:** Friends in a Steam co-op lobby can pass pending offers, pass accepted deals, summon dealers, dismiss meetups, and check dealer stock/cash right from their own phones. The host executes the handoff/movement and syncs deal state, meetup controls, and personal notifications back to the asking player.
 
 ## How It Works
 1. **Passing an offer:** Open any customer offer in Messages and tap **`[Pass to Dealer]`**. Middleman finds a stocked dealer, schedules the deal in their queue, and notifies both chats.
@@ -21,21 +22,26 @@ No extra phone apps, no S1API dependency, and completely save-safe.
 4. **Checking inventory:** Open a dealer's thread → **Compose → `[Check stock & cash]`** before deciding who to summon or restock.
 
 ## Requirements
-- **Schedule I** (tested on v0.4.7f12; host / single-player)
+- **Schedule I** (tested on v0.4.7f12; single-player and Steam co-op multiplayer)
 - **MelonLoader** `0.7.3`+ ([MelonLoader Installer](https://melonwiki.xyz/))
+- **[SteamNetworkLib](https://github.com/ifBars/SteamNetworkLib/releases)** `v1.6.0`+ (matching runtime DLL placed in `UserLibs\`)
 - **No S1API required**
 
+> **Multiplayer note:** Install both **Middleman** (in `Mods\`) and **SteamNetworkLib** (in `UserLibs\`) on the **host and every friend** using the DLL that matches each PC's Steam branch. Unmodded friends won't crash, but won't see Middleman buttons and may still see already-accepted deals in their Journal after a host transfer.
+
 ## Installation
-Download the latest release from [**Releases**](https://github.com/Trooper-code/Middleman/releases/latest) and drop the matching `.dll` into your Schedule I `Mods\` folder:
+Download the latest release from [**Releases**](https://github.com/Trooper-code/Middleman/releases/latest) and `SteamNetworkLib` `v1.6.0`+ from [**SteamNetworkLib Releases**](https://github.com/ifBars/SteamNetworkLib/releases):
 
 ### Normal Steam Branch (IL2CPP)
 1. Install **MelonLoader 0.7.3+** into your Schedule I folder and launch the game once to the main menu.
-2. Download `Middleman.IL2CPP.dll` from the [latest release](https://github.com/Trooper-code/Middleman/releases/latest) and place it in `<Schedule I>\Mods\`.
-3. Launch the game and load your save.
+2. Place `SteamNetworkLib-IL2Cpp.dll` in `<Schedule I>\UserLibs\`.
+3. Download `Middleman.IL2CPP.dll` from the [latest release](https://github.com/Trooper-code/Middleman/releases/latest) and place it in `<Schedule I>\Mods\`.
+4. Launch the game and load your save (or join a co-op lobby).
 
 ### `alternate` Beta Branch (Mono)
 1. Switch Schedule I to the `alternate` beta in Steam and install **MelonLoader 0.7.3+**.
-2. Download `Middleman.Mono.dll` from the [latest release](https://github.com/Trooper-code/Middleman/releases/latest) and place it in `<Schedule I>\Mods\`.
+2. Place `SteamNetworkLib-Mono.dll` in `<Schedule I>\UserLibs\`.
+3. Download `Middleman.Mono.dll` from the [latest release](https://github.com/Trooper-code/Middleman/releases/latest) and place it in `<Schedule I>\Mods\`.
 
 ## Configuration (`UserData/MelonPreferences.cfg`)
 After launching once, a `[Middleman]` section is generated in `<Schedule I>\UserData\MelonPreferences.cfg`:
@@ -59,6 +65,8 @@ After launching once, a `[Middleman]` section is generated in `<Schedule I>\User
    - `ScheduleIManagedDir` → `<Schedule I Mono>\Schedule I_Data\Managed`
    - `ScheduleIIl2CppDir` → `<Schedule I>\MelonLoader\Il2CppAssemblies`
    - `ScheduleIMelonNet6Dir` → `<Schedule I>\MelonLoader\net6`
+   - `SteamNetworkLibMonoDll` → path to `SteamNetworkLib-Mono.dll` (`v1.6.0`+)
+   - `SteamNetworkLibIl2CppDll` → path to `SteamNetworkLib-IL2Cpp.dll` (`v1.6.0`+)
 4. Build both targets:
    ```powershell
    dotnet build src/Middleman/Middleman.csproj -c Release
