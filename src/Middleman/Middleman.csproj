@@ -3,7 +3,7 @@
 
   <PropertyGroup>
     <TargetFrameworks>netstandard2.1;net6.0</TargetFrameworks>
-    <Version>1.0.0</Version>
+    <Version>1.1.0</Version>
     <RootNamespace>Middleman</RootNamespace>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
@@ -30,6 +30,10 @@
            Text="ScheduleIIl2CppDir is not set or Il2CppAssemblies\Assembly-CSharp.dll was not found. Set ScheduleIIl2CppDir in Directory.Build.props.user after running MelonLoader once on the IL2CPP branch." />
     <Error Condition="'$(TargetFramework)' == 'net6.0' And ('$(ScheduleIMelonNet6Dir)' == '' Or !Exists('$(ScheduleIMelonNet6Dir)\Il2CppInterop.Runtime.dll'))"
            Text="ScheduleIMelonNet6Dir is not set or Il2CppInterop.Runtime.dll was not found. Set ScheduleIMelonNet6Dir in Directory.Build.props.user." />
+    <Error Condition="'$(TargetFramework)' == 'netstandard2.1' And ('$(SteamNetworkLibMonoDll)' == '' Or !Exists('$(SteamNetworkLibMonoDll)'))"
+           Text="SteamNetworkLibMonoDll is not set or was not found. Download SteamNetworkLib-Mono.dll and set SteamNetworkLibMonoDll in Directory.Build.props.user." />
+    <Error Condition="'$(TargetFramework)' == 'net6.0' And ('$(SteamNetworkLibIl2CppDll)' == '' Or !Exists('$(SteamNetworkLibIl2CppDll)'))"
+           Text="SteamNetworkLibIl2CppDll is not set or was not found. Download SteamNetworkLib-IL2Cpp.dll and set SteamNetworkLibIl2CppDll in Directory.Build.props.user." />
   </Target>
 
   <ItemGroup>
@@ -47,6 +51,14 @@
     </Reference>
     <Reference Include="FishNet.Runtime">
       <HintPath>$(ScheduleIManagedDir)\FishNet.Runtime.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="com.rlabrecque.steamworks.net">
+      <HintPath>$(ScheduleIManagedDir)\com.rlabrecque.steamworks.net.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="SteamNetworkLib">
+      <HintPath>$(SteamNetworkLibMonoDll)</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.CoreModule">
@@ -90,6 +102,14 @@
     </Reference>
     <Reference Include="Il2CppFishNet.Runtime">
       <HintPath>$(ScheduleIIl2CppDir)\Il2CppFishNet.Runtime.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Il2Cppcom.rlabrecque.steamworks.net">
+      <HintPath>$(ScheduleIIl2CppDir)\Il2Cppcom.rlabrecque.steamworks.net.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="SteamNetworkLib">
+      <HintPath>$(SteamNetworkLibIl2CppDll)</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.CoreModule">
