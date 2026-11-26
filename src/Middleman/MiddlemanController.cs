@@ -47,6 +47,7 @@ internal static class MiddlemanController
 
     /// <summary>
     /// Hands off a customer's currently offered (pending) contract to an eligible dealer.
+    /// Non-host clients forward the request to the host.
     /// </summary>
     public static void TryPassOfferedContract(Customer customer)
     {
@@ -55,29 +56,55 @@ internal static class MiddlemanController
             return;
         }
 
+        if (!InstanceFinder.IsServer)
+        {
+            if (customer.OfferedContractInfo == null)
+            {
+                MiddlemanMod.Log.Warning($"Cannot pass deal for {customer.NPC?.FullName ?? "customer"}: no active offer.");
+                return;
+            }
+
+            if (GameCompat.IsAlive(customer.CurrentContract))
+            {
+                Notify("Middleman", $"{customer.NPC?.FullName ?? "Customer"} already has an active deal.");
+                return;
+            }
+
+            MiddlemanNetwork.SendPassOffer(customer);
+            return;
+        }
+
+        TryPassOfferedContractOnHost(customer, requesterSteamId: 0);
+    }
+
+    internal static void TryPassOfferedContractOnHost(Customer customer, ulong requesterSteamId)
+    {
+        if (!InstanceFinder.IsServer || !GameCompat.IsAlive(customer))
+        {
+            return;
+        }
+
         ContractInfo? info = customer.OfferedContractInfo;
         if (info == null)
         {
             MiddlemanMod.Log.Warning($"Cannot pass deal for {customer.NPC?.FullName ?? "customer"}: no active offer.");
+            if (requesterSteamId != 0)
+            {
+                NotifyRequester(requesterSteamId, "Middleman", $"{customer.NPC?.FullName ?? "Customer"} no longer has a pending offer.");
+            }
             return;
         }
 
         if (GameCompat.IsAlive(customer.CurrentContract))
         {
-            Notify("Middleman", $"{customer.NPC?.FullName ?? "Customer"} already has an active deal.");
-            return;
-        }
-
-        if (!InstanceFinder.IsServer)
-        {
-            Notify("Middleman", "Passing deals is only supported by the host.");
+            NotifyRequester(requesterSteamId, "Middleman", $"{customer.NPC?.FullName ?? "Customer"} already has an active deal.");
             return;
         }
 
         DeliveryLocation? location = ResolveDeliveryLocation(info);
         if (!DealerSelector.TrySelectDealer(customer, info.Products, location, out Dealer? dealer, out string reason) || dealer == null)
         {
-            Notify("Middleman", reason);
+            NotifyRequester(requesterSteamId, "Middleman", reason);
             return;
         }
 
@@ -86,13 +113,13 @@ internal static class MiddlemanController
         if (!GameCompat.IsAlive(contract))
         {
             MiddlemanMod.Log.Warning($"Customer.ContractAccepted returned null for {customer.NPC?.FullName ?? "customer"}.");
-            Notify("Middleman", "Could not hand off this deal right now.");
+            NotifyRequester(requesterSteamId, "Middleman", "Could not hand off this deal right now.");
             return;
         }
 
         if (!AssignContractToDealer(dealer, contract!))
         {
-            Notify("Middleman", "Could not assign contract to dealer.");
+            NotifyRequester(requesterSteamId, "Middleman", "Could not assign contract to dealer.");
             return;
         }
 
@@ -107,11 +134,12 @@ internal static class MiddlemanController
 
         string customerName = customer.NPC?.FullName ?? "Customer";
         SendHandoffMessages(convo, dealer, customerName);
-        Notify("Middleman", $"Passed {customerName}'s deal to {dealer.FullName}.");
+        NotifyRequester(requesterSteamId, "Middleman", $"Passed {customerName}'s deal to {dealer.FullName}.");
     }
 
     /// <summary>
     /// Transfers an already-accepted, player-owned deal to an eligible dealer.
+    /// Non-host clients forward the request to the host.
     /// </summary>
     public static void TryPassAcceptedContract(Customer customer)
     {
@@ -120,28 +148,51 @@ internal static class MiddlemanController
             return;
         }
 
+        if (!InstanceFinder.IsServer)
+        {
+            Contract? clientContract = customer.CurrentContract;
+            if (!GameCompat.IsAlive(clientContract) || clientContract!.State != EQuestState.Active)
+            {
+                Notify("Middleman", "This customer does not have an active deal.");
+                return;
+            }
+
+            if (GameCompat.IsAlive(clientContract.Dealer))
+            {
+                Notify("Middleman", $"This deal is already assigned to {clientContract.Dealer.FullName}.");
+                return;
+            }
+
+            MiddlemanNetwork.SendPassAccepted(customer);
+            return;
+        }
+
+        TryPassAcceptedContractOnHost(customer, requesterSteamId: 0);
+    }
+
+    internal static void TryPassAcceptedContractOnHost(Customer customer, ulong requesterSteamId)
+    {
+        if (!InstanceFinder.IsServer || !MiddlemanConfig.AllowPassingAcceptedDeals.Value || !GameCompat.IsAlive(customer))
+        {
+            return;
+        }
+
         Contract? contract = customer.CurrentContract;
         if (!GameCompat.IsAlive(contract) || contract!.State != EQuestState.Active)
         {
-            Notify("Middleman", "This customer does not have an active deal.");
+            NotifyRequester(requesterSteamId, "Middleman", "This customer does not have an active deal.");
             return;
         }
 
         if (GameCompat.IsAlive(contract.Dealer))
         {
-            Notify("Middleman", $"This deal is already assigned to {contract.Dealer.FullName}.");
-            return;
-        }
-
-        if (!InstanceFinder.IsServer)
-        {
-            Notify("Middleman", "Passing deals is only supported by the host.");
+            NotifyRequester(requesterSteamId, "Middleman", $"This deal is already assigned to {contract.Dealer.FullName}.");
             return;
         }
 
         if (!DealerSelector.TrySelectDealer(customer, contract.ProductList, contract.DeliveryLocation, out Dealer? dealer, out string reason) || dealer == null)
         {
-            Notify("Middleman", reason);
+            NotifyRequester(requesterSteamId, "Middleman", reason);
             return;
         }
 
@@ -151,17 +202,42 @@ internal static class MiddlemanController
 
         if (!AssignContractToDealer(dealer, contract))
         {
-            Notify("Middleman", "Could not assign contract to dealer.");
+            NotifyRequester(requesterSteamId, "Middleman", "Could not assign contract to dealer.");
             return;
         }
 
         dealer.HasChanged = true;
         contract.HasChanged = true;
 
+        MiddlemanNetwork.BroadcastContractAssigned(contract.GUID.ToString(), dealer.ID);
+
         MSGConversation? convo = customer.NPC?.MSGConversation;
         string customerName = customer.NPC?.FullName ?? "Customer";
         SendHandoffMessages(convo, dealer, customerName);
-        Notify("Middleman", $"Handed {customerName}'s active deal to {dealer.FullName}.");
+        NotifyRequester(requesterSteamId, "Middleman", $"Handed {customerName}'s active deal to {dealer.FullName}.");
+    }
+
+    /// <summary>
+    /// Applies a host-assigned dealer transfer on non-host clients so the contract clears
+    /// from the client's Journal, HUD, and map markers.
+    /// </summary>
+    internal static void ApplyRemoteContractAssigned(string contractGuid, string dealerId)
+    {
+        if (InstanceFinder.IsServer)
+        {
+            return;
+        }
+
+        Contract? contract = MiddlemanNetwork.FindContractByGuid(contractGuid);
+        Dealer? dealer = MiddlemanNetwork.FindDealerById(dealerId);
+        if (!GameCompat.IsAlive(contract) || !GameCompat.IsAlive(dealer))
+        {
+            return;
+        }
+
+        contract!.SetIsTracked(false);
+        contract.SetDealer(dealer!);
+        HideContractPoIs(contract);
     }
 
     private static void SendHandoffMessages(MSGConversation? customerConvo, Dealer dealer, string customerName)
@@ -227,7 +303,7 @@ internal static class MiddlemanController
         return true;
     }
 
-    private static void HideContractPoIs(Contract contract)
+    internal static void HideContractPoIs(Contract contract)
     {
         if (contract.Entries == null)
         {
@@ -242,6 +318,18 @@ internal static class MiddlemanController
                 entry.PoI.gameObject.SetActive(false);
             }
         }
+    }
+
+    internal static void NotifyRequester(ulong requesterSteamId, string title, string subtitle)
+    {
+        if (requesterSteamId == 0)
+        {
+            Notify(title, subtitle);
+            return;
+        }
+
+        MiddlemanMod.Log.Msg($"{title} (for {requesterSteamId}): {subtitle}");
+        MiddlemanNetwork.SendToastToClient(requesterSteamId, title, subtitle);
     }
 
     public static void Notify(string title, string subtitle)

@@ -56,6 +56,7 @@ internal static class DealerMeetupManager
         public Dealer Dealer { get; }
         public Property TargetProperty { get; }
         public Vector3 Destination { get; }
+        public ulong RequesterSteamId { get; }
         public bool HasArrived { get; set; }
         public bool HasInteractedWithPlayer { get; set; }
         public bool HasAttemptedMove { get; set; }
@@ -63,30 +64,71 @@ internal static class DealerMeetupManager
         public float NextRepathTime { get; set; }
         public int ArrivalTotalMins { get; set; }
 
-        public ActiveMeetup(Dealer dealer, Property targetProperty, Vector3 destination)
+        public ActiveMeetup(Dealer dealer, Property targetProperty, Vector3 destination, ulong requesterSteamId)
         {
             Dealer = dealer;
             TargetProperty = targetProperty;
             Destination = destination;
+            RequesterSteamId = requesterSteamId;
         }
     }
 
     private static readonly Dictionary<string, ActiveMeetup> ActiveMeetups = new();
+    private static readonly HashSet<string> ClientActiveMeetupDealerIds = new();
     private static readonly List<string> KeysBuffer = new();
     private static float _nextUpdateTime;
 
     public static void ResetState()
     {
         ActiveMeetups.Clear();
+        ClientActiveMeetupDealerIds.Clear();
         KeysBuffer.Clear();
         _nextUpdateTime = 0f;
     }
 
     public static bool HasActiveMeetup(Dealer? dealer)
     {
-        return GameCompat.IsAlive(dealer)
-            && !string.IsNullOrEmpty(dealer!.ID)
-            && ActiveMeetups.ContainsKey(dealer.ID);
+        if (!GameCompat.IsAlive(dealer) || string.IsNullOrEmpty(dealer!.ID))
+        {
+            return false;
+        }
+
+        if (InstanceFinder.IsServer)
+        {
+            return ActiveMeetups.ContainsKey(dealer.ID);
+        }
+
+        return ClientActiveMeetupDealerIds.Contains(dealer.ID);
+    }
+
+    internal static void SetClientMeetupState(string dealerId, bool active)
+    {
+        if (string.IsNullOrEmpty(dealerId) || InstanceFinder.IsServer)
+        {
+            return;
+        }
+
+        if (active)
+        {
+            ClientActiveMeetupDealerIds.Add(dealerId);
+        }
+        else
+        {
+            ClientActiveMeetupDealerIds.Remove(dealerId);
+        }
+    }
+
+    internal static void SendActiveMeetupsToClient(ulong targetSteamId)
+    {
+        if (!InstanceFinder.IsServer || targetSteamId == 0)
+        {
+            return;
+        }
+
+        foreach (string dealerId in ActiveMeetups.Keys)
+        {
+            MiddlemanNetwork.BroadcastMeetupState(dealerId, active: true, targetSteamId);
+        }
     }
 
     /// <summary>
@@ -114,6 +156,7 @@ internal static class DealerMeetupManager
 
     /// <summary>
     /// Instructs a recruited dealer to walk to one of the player's owned properties and wait there.
+    /// Non-host clients forward the request to the host.
     /// </summary>
     public static void RequestMeetup(Dealer dealer, Property property)
     {
@@ -124,7 +167,22 @@ internal static class DealerMeetupManager
 
         if (!InstanceFinder.IsServer)
         {
-            MiddlemanController.Notify("Middleman", "Dealer meetups are only supported by the host.");
+            if (!dealer.IsRecruited || !dealer.IsConscious || !property.IsOwned)
+            {
+                return;
+            }
+
+            MiddlemanNetwork.SendSummonDealer(dealer, property);
+            return;
+        }
+
+        RequestMeetupOnHost(dealer, property, requesterSteamId: 0);
+    }
+
+    internal static void RequestMeetupOnHost(Dealer dealer, Property property, ulong requesterSteamId)
+    {
+        if (!InstanceFinder.IsServer || !MiddlemanConfig.AllowDealerMeetups.Value || !GameCompat.IsAlive(dealer) || !GameCompat.IsAlive(property))
+        {
             return;
         }
 
@@ -134,8 +192,9 @@ internal static class DealerMeetupManager
         }
 
         Vector3 destination = GetMeetPoint(property);
-        ActiveMeetup meetup = new(dealer, property, destination);
+        ActiveMeetup meetup = new(dealer, property, destination, requesterSteamId);
         ActiveMeetups[dealer.ID] = meetup;
+        MiddlemanNetwork.BroadcastMeetupState(dealer.ID, active: true);
 
         PauseActiveDealForMeetup(dealer);
 
@@ -152,15 +211,32 @@ internal static class DealerMeetupManager
 
         BeginWalk(meetup);
         MiddlemanMod.Log.Msg($"Meetup started: {dealer.FullName} -> {property.PropertyName} ({destination})");
-        MiddlemanController.Notify("Middleman", $"{dealer.FullName} is heading to {property.PropertyName}.");
+        MiddlemanController.NotifyRequester(requesterSteamId, "Middleman", $"{dealer.FullName} is heading to {property.PropertyName}.");
     }
 
     /// <summary>
     /// Releases a dealer from an active property meetup and restores their normal schedule.
+    /// Non-host clients forward the request to the host.
     /// </summary>
     public static void CancelMeetup(Dealer dealer, bool sendChat = true)
     {
         if (!GameCompat.IsAlive(dealer) || string.IsNullOrEmpty(dealer.ID))
+        {
+            return;
+        }
+
+        if (!InstanceFinder.IsServer)
+        {
+            MiddlemanNetwork.SendCancelMeetup(dealer);
+            return;
+        }
+
+        CancelMeetupOnHost(dealer, sendChat);
+    }
+
+    internal static void CancelMeetupOnHost(Dealer dealer, bool sendChat = true)
+    {
+        if (!InstanceFinder.IsServer || !GameCompat.IsAlive(dealer) || string.IsNullOrEmpty(dealer.ID))
         {
             return;
         }
@@ -170,6 +246,7 @@ internal static class DealerMeetupManager
             return;
         }
 
+        MiddlemanNetwork.BroadcastMeetupState(dealer.ID, active: false);
         RestoreNormalState(dealer);
         MiddlemanMod.Log.Msg($"Meetup cancelled for {dealer.FullName}.");
 
@@ -187,10 +264,27 @@ internal static class DealerMeetupManager
 
     /// <summary>
     /// Replies in the dealer's chat with their current cash, active drop count, and packaged product stock.
+    /// Non-host clients forward the request to the host (which owns authoritative ActiveContracts).
     /// </summary>
     public static void SendStatusReport(Dealer dealer)
     {
         if (!GameCompat.IsAlive(dealer) || !dealer.IsRecruited || dealer.MSGConversation == null)
+        {
+            return;
+        }
+
+        if (!InstanceFinder.IsServer)
+        {
+            MiddlemanNetwork.SendCheckStatus(dealer);
+            return;
+        }
+
+        SendStatusReportOnHost(dealer);
+    }
+
+    internal static void SendStatusReportOnHost(Dealer dealer)
+    {
+        if (!InstanceFinder.IsServer || !GameCompat.IsAlive(dealer) || !dealer.IsRecruited || dealer.MSGConversation == null)
         {
             return;
         }
@@ -298,6 +392,7 @@ internal static class DealerMeetupManager
         if (!GameCompat.IsAlive(dealer) || !dealer.IsConscious || !InstanceFinder.IsServer || !GameCompat.IsAlive(meetup.TargetProperty))
         {
             ActiveMeetups.Remove(id);
+            MiddlemanNetwork.BroadcastMeetupState(id, active: false);
             if (GameCompat.IsAlive(dealer))
             {
                 RestoreNormalState(dealer);
@@ -353,20 +448,21 @@ internal static class DealerMeetupManager
             return;
         }
 
-        if (GameCompat.IsAlive(Player.Local))
+        if (TryGetNearestAlivePlayer(dealer.Movement.FootPosition, out Player? nearestPlayer, out float nearestDistance)
+            && nearestPlayer != null)
         {
-            float distToPlayer = Vector3.Distance(dealer.Movement.FootPosition, Player.Local.transform.position);
-            if (distToPlayer <= 6f)
+            if (nearestDistance <= 6f)
             {
-                dealer.Movement.FacePoint(Player.Local.transform.position);
+                dealer.Movement.FacePoint(nearestPlayer.transform.position);
             }
             else if (MiddlemanConfig.AutoDismissAfterMeetup.Value
                 && meetup.HasInteractedWithPlayer
-                && distToPlayer >= AutoDismissDistance)
+                && nearestDistance >= AutoDismissDistance)
             {
                 ActiveMeetups.Remove(id);
+                MiddlemanNetwork.BroadcastMeetupState(id, active: false);
                 RestoreNormalState(dealer);
-                MiddlemanMod.Log.Msg($"Meetup auto-dismissed for {dealer.FullName} after player walked away.");
+                MiddlemanMod.Log.Msg($"Meetup auto-dismissed for {dealer.FullName} after all players walked away.");
                 if (dealer.MSGConversation != null)
                 {
                     MessageChain reply = new();
@@ -384,6 +480,7 @@ internal static class DealerMeetupManager
             if (elapsed >= waitMinutes)
             {
                 ActiveMeetups.Remove(id);
+                MiddlemanNetwork.BroadcastMeetupState(id, active: false);
                 RestoreNormalState(dealer);
                 MiddlemanMod.Log.Msg($"Meetup timed out for {dealer.FullName}; returning to schedule.");
             }
@@ -451,7 +548,41 @@ internal static class DealerMeetupManager
         }
 
         MiddlemanMod.Log.Msg($"Meetup arrived: {dealer.FullName} at {meetup.TargetProperty.PropertyName}.");
-        MiddlemanController.Notify("Middleman", $"{dealer.FullName} arrived at {meetup.TargetProperty.PropertyName}.");
+        MiddlemanController.NotifyRequester(meetup.RequesterSteamId, "Middleman", $"{dealer.FullName} arrived at {meetup.TargetProperty.PropertyName}.");
+    }
+
+    private static bool TryGetNearestAlivePlayer(Vector3 fromPosition, out Player? nearestPlayer, out float nearestDistance)
+    {
+        nearestPlayer = null;
+        nearestDistance = float.MaxValue;
+
+        var players = Player.PlayerList;
+        if (players != null && players.Count > 0)
+        {
+            for (int i = 0; i < players.Count; i++)
+            {
+                Player candidate = players[i];
+                if (!GameCompat.IsAlive(candidate))
+                {
+                    continue;
+                }
+
+                float dist = Vector3.Distance(fromPosition, candidate.transform.position);
+                if (dist < nearestDistance)
+                {
+                    nearestDistance = dist;
+                    nearestPlayer = candidate;
+                }
+            }
+        }
+
+        if (nearestPlayer == null && GameCompat.IsAlive(Player.Local))
+        {
+            nearestPlayer = Player.Local;
+            nearestDistance = Vector3.Distance(fromPosition, Player.Local.transform.position);
+        }
+
+        return nearestPlayer != null;
     }
 
     private static void PauseActiveDealForMeetup(Dealer dealer)
