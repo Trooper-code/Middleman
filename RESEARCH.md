@@ -52,7 +52,7 @@ Findings below were gathered on `mp1-net-research` for Schedule I `v0.4.7f12` (M
 ### Chosen Channel
 
 - **Primary choice: Steam lobby chat** (`SteamMatchmaking.SendLobbyChatMsg` + `Callback<LobbyChatMsg_t>` + `SteamMatchmaking.GetLobbyChatEntry`) carrying a versioned text envelope `S1NET|1|<modId>|<dir>|<msgType>|<payload...>`.
-  - **Why:** Works on both Mono and IL2CPP with zero new dependencies, zero custom FishNet serializers, zero Harmony patches on game networking, and one shared pattern reusable by Overhead Sprinkler (`S1NET|1|sprinkler|...`). `unverified` (pending live two-player probe test).
+  - **Why:** Compiles cleanly against both Mono (`netstandard2.1`) and IL2CPP (`net6.0`) game/Steamworks assemblies with zero new dependencies, zero custom FishNet serializers, and zero Harmony patches on game networking (`confirmed` at compile time via `dotnet build tools/netprobe/NetProbe.csproj -c Debug` `[confirmed @ mp1-net-research | Schedule I=v0.4.7f12, MelonLoader=0.7.3]`); live two-player delivery remains `unverified` pending Josh's probe test. Reusable by Overhead Sprinkler (`S1NET|1|sprinkler|...`).
   - **Fallback:** `SteamNetworkingMessages` if Steam lobby chat ever hits unexpected length/rate limits in live testing (`unverified`).
   - **Game quirk — `Lobby.LobbyID` stays `0`:** `ScheduleOne.Networking.Lobby.LobbyID` (`Lobby.cs:32`) is never assigned in `Lobby.cs` or `SteamLobbyService.cs`. The real active lobby ID is stored on `SteamLobbyService._lobbyID` (`SteamLobbyService.cs:58, 210, 237`), reachable via `Singleton<Lobby>.Instance._lobbyService` (cast to `SteamLobbyService`). On Mono `_lobbyService` and `_lobbyID` are private, so read via Harmony `AccessTools`; on IL2CPP proxies they are exposed as fields/properties (`unverified`).
 
