@@ -181,13 +181,23 @@ internal static class DealerMeetupManager
 
     internal static void RequestMeetupOnHost(Dealer dealer, Property property, ulong requesterSteamId)
     {
-        if (!InstanceFinder.IsServer || !MiddlemanConfig.AllowDealerMeetups.Value || !GameCompat.IsAlive(dealer) || !GameCompat.IsAlive(property))
+        if (!InstanceFinder.IsServer || !GameCompat.IsAlive(dealer) || !GameCompat.IsAlive(property))
         {
+            return;
+        }
+
+        if (!MiddlemanConfig.AllowDealerMeetups.Value)
+        {
+            MiddlemanController.NotifyRequester(requesterSteamId, "Middleman", "The host has disabled dealer property meetups.");
             return;
         }
 
         if (!dealer.IsRecruited || !dealer.IsConscious || !property.IsOwned)
         {
+            if (requesterSteamId != 0)
+            {
+                MiddlemanController.NotifyRequester(requesterSteamId, "Middleman", "Dealer is unavailable or property is not owned on the host.");
+            }
             return;
         }
 
@@ -234,7 +244,7 @@ internal static class DealerMeetupManager
         CancelMeetupOnHost(dealer, sendChat);
     }
 
-    internal static void CancelMeetupOnHost(Dealer dealer, bool sendChat = true)
+    internal static void CancelMeetupOnHost(Dealer dealer, bool sendChat = true, ulong requesterSteamId = 0)
     {
         if (!InstanceFinder.IsServer || !GameCompat.IsAlive(dealer) || string.IsNullOrEmpty(dealer.ID))
         {
@@ -243,6 +253,14 @@ internal static class DealerMeetupManager
 
         if (!ActiveMeetups.Remove(dealer.ID))
         {
+            if (requesterSteamId != 0)
+            {
+                MiddlemanNetwork.BroadcastMeetupState(dealer.ID, active: false, requesterSteamId);
+                if (!MiddlemanConfig.AllowDealerMeetups.Value)
+                {
+                    MiddlemanController.NotifyRequester(requesterSteamId, "Middleman", "The host has disabled dealer property meetups.");
+                }
+            }
             return;
         }
 

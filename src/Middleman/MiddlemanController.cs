@@ -172,8 +172,14 @@ internal static class MiddlemanController
 
     internal static void TryPassAcceptedContractOnHost(Customer customer, ulong requesterSteamId)
     {
-        if (!InstanceFinder.IsServer || !MiddlemanConfig.AllowPassingAcceptedDeals.Value || !GameCompat.IsAlive(customer))
+        if (!InstanceFinder.IsServer || !GameCompat.IsAlive(customer))
         {
+            return;
+        }
+
+        if (!MiddlemanConfig.AllowPassingAcceptedDeals.Value)
+        {
+            NotifyRequester(requesterSteamId, "Middleman", "The host has disabled passing already-accepted deals.");
             return;
         }
 

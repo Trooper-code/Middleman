@@ -4,11 +4,12 @@ All notable changes to **Middleman Mod** are documented here.
 
 ## [1.1.0] - Unreleased
 ### Added
-- **Co-op Multiplayer Support (`SteamNetworkLib` v1.6.0):** Non-host players in a Steam co-op lobby can now pass pending offers (`[Pass to Dealer]`), pass already-accepted deals (`[Pass deal to dealer]`), summon dealers (`[Meet me at a property]`), dismiss meetups (`[Head back]`), and check dealer stock/cash (`[Check stock & cash]`) directly from their own phone.
-- **Host-to-Client Sync & Feedback:** Routed outcome/error toast notifications back to the requesting player, synced accepted-deal dealer transfers (`CONTRACT_ASSIGNED`) so deals clear from every player's Journal/HUD/map, and synced active meetup state (`MEETUP_STATE` + `SYNC_STATE`) so `[Head back]` shows accurately for clients.
+- **Optional Co-op Multiplayer Support (`SteamNetworkLib` v1.6.0, unverified live):** Non-host players in a Steam co-op lobby can now pass pending offers (`[Pass to Dealer]`), pass already-accepted deals (`[Pass deal to dealer]`), summon dealers (`[Meet me at a property]`), dismiss meetups (`[Head back]`), and check dealer stock/cash (`[Check stock & cash]`) directly from their own phone. `SteamNetworkLib` (`UserLibs\`) is now loaded as an optional soft dependency behind `ISyncBackend` + `NoInlining` isolation so single-player works with no `UserLibs\` DLL.
+- **Host-to-Client Sync & Feedback (unverified live):** Routed outcome/error toast notifications back to the requesting player—including when host config disables passing accepted deals or dealer meetups, or when `HEAD_BACK`/`CHECK_STATUS` cannot find the dealer on the host—synced accepted-deal dealer transfers (`CONTRACT_ASSIGNED`) so deals clear from every player's Journal/HUD/map, and synced active meetup state (`MEETUP_STATE` + `SYNC_STATE`) so `[Head back]` shows accurately for clients.
 
 ### Fixed
-- **Multiplayer Dealer Meetup Proximity:** Updated `DealerMeetupManager` to check `Player.PlayerList` instead of `Player.Local` so summoned dealers face whichever player approaches them and only auto-dismiss once all players have walked away.
+- **Multiplayer Dealer Meetup Proximity (unverified live):** Updated `DealerMeetupManager` to check `Player.PlayerList` instead of `Player.Local` so summoned dealers face whichever player approaches them and only auto-dismiss once all players have walked away.
+- **Throttled `SteamNetworkLib` Init Retries (unverified live):** Throttled `MiddlemanNetwork.TryInitializeClient()` retries to once every 2 seconds (and stop permanently if `SteamNetworkLib` is missing from `UserLibs\`) instead of retrying every frame in `OnUpdate()`.
 
 ## [1.0.0] - 2026-11-25
 ### Added

@@ -1,8 +1,8 @@
 using System;
 using System.Collections.Generic;
-using SteamNetworkLib;
-using SteamNetworkLib.Core;
-using SteamNetworkLib.Models;
+using System.IO;
+using System.Runtime.CompilerServices;
+using System.Threading.Tasks;
 #if IL2CPP
 using Il2CppFishNet;
 using Il2CppScheduleOne.DevUtilities;
@@ -10,7 +10,13 @@ using Il2CppScheduleOne.Economy;
 using Il2CppScheduleOne.Networking;
 using Il2CppScheduleOne.Property;
 using Il2CppScheduleOne.Quests;
+#if HAS_STEAMNETWORKLIB
 using Il2CppSteamworks;
+using SteamNetworkLib;
+using SteamNetworkLib.Core;
+using SteamNetworkLib.Exceptions;
+using SteamNetworkLib.Models;
+#endif
 #else
 using FishNet;
 using ScheduleOne.DevUtilities;
@@ -18,21 +24,47 @@ using ScheduleOne.Economy;
 using ScheduleOne.Networking;
 using ScheduleOne.Property;
 using ScheduleOne.Quests;
+#if HAS_STEAMNETWORKLIB
 using Steamworks;
+using SteamNetworkLib;
+using SteamNetworkLib.Core;
+using SteamNetworkLib.Exceptions;
+using SteamNetworkLib.Models;
+#endif
 #endif
 
 namespace Middleman;
 
 /// <summary>
-/// Handles client-to-host requests and host-to-client synchronization over SteamNetworkLib.
-/// Single-player sessions never require a Steam lobby and fall back cleanly to local execution.
+/// Handles client-to-host requests and host-to-client synchronization over optional SteamNetworkLib.
+/// Single-player sessions never require SteamNetworkLib in UserLibs\ and fall back cleanly to local execution.
 /// </summary>
 internal static class MiddlemanNetwork
 {
+#if HAS_STEAMNETWORKLIB
     private const string Prefix = "MM2|";
+    private const double InitRetryIntervalSeconds = 2.0;
 
-    private static SteamNetworkClient? _client;
-    private static bool _initialized;
+    private interface ISyncBackend
+    {
+        bool Initialize(out string? errorMessage);
+        void ProcessIncoming();
+        void Dispose();
+        bool IsInLobby { get; }
+        ulong HostPlayerId64 { get; }
+        ulong LocalPlayerId64 { get; }
+        void SendText(ulong targetSteamId, string wire);
+        void BroadcastText(string wire);
+        bool TryGetLobbyMember(ulong steamId);
+    }
+
+    private static ISyncBackend? _backend;
+    private static bool _permanentlyUnavailable;
+    private static bool _loggedUnavailable;
+    private static string? _lastInitWarning;
+    private static DateTime _nextInitAttemptUtc = DateTime.MinValue;
+
+    public static bool IsAvailable => _backend != null;
 
     public static void Initialize()
     {
@@ -41,21 +73,21 @@ internal static class MiddlemanNetwork
 
     public static void Update()
     {
-        if (!TryInitializeClient() || _client == null)
+        if (!TryInitializeClient() || _backend == null)
         {
             return;
         }
 
-        _client.ProcessIncomingMessages();
+        _backend.ProcessIncoming();
     }
 
     public static void Dispose()
     {
-        _initialized = false;
-        if (_client != null)
+        _nextInitAttemptUtc = DateTime.MinValue;
+        if (_backend != null)
         {
-            _client.Dispose();
-            _client = null;
+            _backend.Dispose();
+            _backend = null;
         }
     }
 
@@ -127,13 +159,13 @@ internal static class MiddlemanNetwork
 
     public static void SendToastToClient(ulong targetSteamId, string title, string subtitle)
     {
-        if (targetSteamId == 0 || !InstanceFinder.IsServer || !TryInitializeClient() || _client == null)
+        if (targetSteamId == 0 || !InstanceFinder.IsServer || !TryInitializeClient() || _backend == null)
         {
             return;
         }
 
         string wire = $"{Prefix}TOAST|{SanitizeField(title)}|{SanitizeField(subtitle)}";
-        _ = _client.SendTextMessageAsync(new CSteamID(targetSteamId), wire);
+        _backend.SendText(targetSteamId, wire);
     }
 
     public static void BroadcastContractAssigned(string contractGuid, string dealerId)
@@ -158,9 +190,9 @@ internal static class MiddlemanNetwork
 
         if (targetSteamId.HasValue && targetSteamId.Value != 0)
         {
-            if (TryInitializeClient() && _client != null)
+            if (TryInitializeClient() && _backend != null)
             {
-                _ = _client.SendTextMessageAsync(new CSteamID(targetSteamId.Value), wire);
+                _backend.SendText(targetSteamId.Value, wire);
             }
             return;
         }
@@ -170,31 +202,66 @@ internal static class MiddlemanNetwork
 
     private static bool TryInitializeClient()
     {
-        if (_initialized)
+        if (_backend != null)
         {
             return true;
         }
 
-        _client ??= new SteamNetworkClient(new NetworkRules
-        {
-            EnableRelay = true,
-            AcceptOnlyFriends = false
-        });
-
-        if (!_client.TryInitialize(out _))
+        if (_permanentlyUnavailable)
         {
             return false;
         }
 
-        _client.RegisterMessageHandler<TextMessage>(OnTextMessageReceived);
-        _initialized = true;
-        MiddlemanMod.Log.Msg("SteamNetworkLib client initialized for Middleman multiplayer.");
-        return true;
+        DateTime now = DateTime.UtcNow;
+        if (now < _nextInitAttemptUtc)
+        {
+            return false;
+        }
+        _nextInitAttemptUtc = now.AddSeconds(InitRetryIntervalSeconds);
+
+        try
+        {
+            ISyncBackend? candidate = CreateAndInitBackend(out string? errorMessage);
+            if (candidate != null)
+            {
+                _backend = candidate;
+                _lastInitWarning = null;
+                MiddlemanMod.Log.Msg("SteamNetworkLib client initialized for Middleman multiplayer.");
+                return true;
+            }
+
+            if (!string.IsNullOrEmpty(errorMessage) && errorMessage != _lastInitWarning)
+            {
+                _lastInitWarning = errorMessage;
+                MiddlemanMod.Log.Warning($"SteamNetworkLib not ready yet: {errorMessage}");
+            }
+        }
+        catch (Exception ex) when (ex is FileNotFoundException || ex is TypeLoadException || ex is BadImageFormatException)
+        {
+            _permanentlyUnavailable = true;
+            if (!_loggedUnavailable)
+            {
+                _loggedUnavailable = true;
+                MiddlemanMod.Log.Msg(
+                    "SteamNetworkLib was not found in UserLibs\\; single-player works normally, " +
+                    "and co-op multiplayer sync is disabled.");
+            }
+        }
+        catch (Exception ex)
+        {
+            if (ex.Message != _lastInitWarning)
+            {
+                _lastInitWarning = ex.Message;
+                MiddlemanMod.Log.Warning($"SteamNetworkLib init deferred: {ex.Message}");
+            }
+        }
+
+        return false;
     }
 
     private static bool IsMultiplayerSession()
     {
-        if (_client != null && _client.IsInLobby)
+        if (_backend != null && _backend.IsInLobby)
         {
             return true;
         }
@@ -206,9 +273,9 @@ internal static class MiddlemanNetwork
     {
         hostId = 0;
 
-        if (_client != null && _client.HostPlayerId64 != 0)
+        if (_backend != null && _backend.HostPlayerId64 != 0)
         {
-            hostId = _client.HostPlayerId64;
+            hostId = _backend.HostPlayerId64;
             return true;
         }
 
@@ -227,7 +294,19 @@ internal static class MiddlemanNetwork
 
     private static bool SendToHost(string wire, bool notifyOnFailure)
     {
-        if (!TryInitializeClient() || _client == null || !TryGetHostSteamId(out ulong hostId))
+        if (!TryInitializeClient() || _backend == null)
+        {
+            if (notifyOnFailure)
+            {
+                string message = _permanentlyUnavailable
+                    ? "Co-op actions require SteamNetworkLib in UserLibs\\."
+                    : "Could not reach the host right now. Make sure you're in a Steam co-op lobby.";
+                MiddlemanController.Notify("Middleman", message);
+            }
+            return false;
+        }
+
+        if (!TryGetHostSteamId(out ulong hostId))
         {
             if (notifyOnFailure)
             {
@@ -236,20 +315,20 @@ internal static class MiddlemanNetwork
             return false;
         }
 
-        _ = _client.SendTextMessageAsync(new CSteamID(hostId), wire);
+        _backend.SendText(hostId, wire);
         return true;
     }
 
     private static void BroadcastToClients(string wire)
     {
-        if (!TryInitializeClient() || _client == null || !IsMultiplayerSession())
+        if (!TryInitializeClient() || _backend == null || !IsMultiplayerSession())
         {
             return;
         }
 
-        if (_client.IsInLobby)
+        if (_backend.IsInLobby)
         {
-            _client.BroadcastTextMessage(wire);
+            _backend.BroadcastText(wire);
             return;
         }
 
@@ -258,7 +337,7 @@ internal static class MiddlemanNetwork
             return;
         }
 
-        ulong localId = _client.LocalPlayerId64;
+        ulong localId = _backend.LocalPlayerId64;
         var members = Singleton<Lobby>.Instance.GetLobbyMemberIDs();
         if (members == null)
         {
@@ -269,19 +348,19 @@ internal static class MiddlemanNetwork
         {
             if (ulong.TryParse(members[i], out ulong memberId) && memberId != 0 && memberId != localId)
             {
-                _ = _client.SendTextMessageAsync(new CSteamID(memberId), wire);
+                _backend.SendText(memberId, wire);
             }
         }
     }
 
-    private static void OnTextMessageReceived(TextMessage message, CSteamID sender)
+    private static void OnWireMessageReceived(string content, ulong senderSteamId)
     {
-        if (message == null || string.IsNullOrEmpty(message.Content) || !message.Content.StartsWith(Prefix, StringComparison.Ordinal))
+        if (string.IsNullOrEmpty(content) || !content.StartsWith(Prefix, StringComparison.Ordinal))
         {
             return;
         }
 
-        string[] parts = message.Content.Substring(Prefix.Length).Split('|');
+        string[] parts = content.Substring(Prefix.Length).Split('|');
         if (parts.Length == 0 || string.IsNullOrEmpty(parts[0]))
         {
             return;
@@ -291,23 +370,21 @@ internal static class MiddlemanNetwork
 
         if (InstanceFinder.IsServer)
         {
-            HandleServerMessage(msgType, parts, sender);
+            HandleServerMessage(msgType, parts, senderSteamId);
         }
         else
         {
-            HandleClientMessage(msgType, parts, sender);
+            HandleClientMessage(msgType, parts, senderSteamId);
         }
     }
 
-    private static void HandleServerMessage(string msgType, string[] parts, CSteamID sender)
+    private static void HandleServerMessage(string msgType, string[] parts, ulong senderSteamId)
     {
-        if (!IsAuthorizedLobbyMember(sender))
+        if (!IsAuthorizedLobbyMember(senderSteamId))
         {
-            MiddlemanMod.Log.Warning($"Ignored '{msgType}' from non-lobby SteamID {sender.m_SteamID}.");
+            MiddlemanMod.Log.Warning($"Ignored '{msgType}' from non-lobby SteamID {senderSteamId}.");
             return;
         }
-
-        ulong requesterId = sender.m_SteamID;
 
         switch (msgType)
         {
@@ -317,11 +394,11 @@ internal static class MiddlemanNetwork
                     Customer? customer = FindCustomerByNpcId(parts[1]);
                     if (GameCompat.IsAlive(customer))
                     {
-                        MiddlemanController.TryPassOfferedContractOnHost(customer!, requesterId);
+                        MiddlemanController.TryPassOfferedContractOnHost(customer!, senderSteamId);
                     }
                     else
                     {
-                        SendToastToClient(requesterId, "Middleman", "Customer was not found on the host.");
+                        SendToastToClient(senderSteamId, "Middleman", "Customer was not found on the host.");
                     }
                 }
                 break;
@@ -332,11 +409,11 @@ internal static class MiddlemanNetwork
                     Customer? customer = FindCustomerByNpcId(parts[1]);
                     if (GameCompat.IsAlive(customer))
                     {
-                        MiddlemanController.TryPassAcceptedContractOnHost(customer!, requesterId);
+                        MiddlemanController.TryPassAcceptedContractOnHost(customer!, senderSteamId);
                     }
                     else
                     {
-                        SendToastToClient(requesterId, "Middleman", "Customer was not found on the host.");
+                        SendToastToClient(senderSteamId, "Middleman", "Customer was not found on the host.");
                     }
                 }
                 break;
@@ -348,11 +425,11 @@ internal static class MiddlemanNetwork
                     Property? property = FindPropertyByKey(parts[2]);
                     if (GameCompat.IsAlive(dealer) && GameCompat.IsAlive(property))
                     {
-                        DealerMeetupManager.RequestMeetupOnHost(dealer!, property!, requesterId);
+                        DealerMeetupManager.RequestMeetupOnHost(dealer!, property!, senderSteamId);
                     }
                     else
                     {
-                        SendToastToClient(requesterId, "Middleman", "Dealer or property was not found on the host.");
+                        SendToastToClient(senderSteamId, "Middleman", "Dealer or property was not found on the host.");
                     }
                 }
                 break;
@@ -363,7 +440,11 @@ internal static class MiddlemanNetwork
                     Dealer? dealer = FindDealerById(parts[1]);
                     if (GameCompat.IsAlive(dealer))
                     {
-                        DealerMeetupManager.CancelMeetupOnHost(dealer!, sendChat: true);
+                        DealerMeetupManager.CancelMeetupOnHost(dealer!, sendChat: true, requesterSteamId: senderSteamId);
+                    }
+                    else
+                    {
+                        SendToastToClient(senderSteamId, "Middleman", "Dealer was not found on the host.");
                     }
                 }
                 break;
@@ -376,20 +457,24 @@ internal static class MiddlemanNetwork
                     {
                         DealerMeetupManager.SendStatusReportOnHost(dealer!);
                     }
+                    else
+                    {
+                        SendToastToClient(senderSteamId, "Middleman", "Dealer was not found on the host.");
+                    }
                 }
                 break;
 
             case "SYNC_STATE":
-                DealerMeetupManager.SendActiveMeetupsToClient(requesterId);
+                DealerMeetupManager.SendActiveMeetupsToClient(senderSteamId);
                 break;
         }
     }
 
-    private static void HandleClientMessage(string msgType, string[] parts, CSteamID sender)
+    private static void HandleClientMessage(string msgType, string[] parts, ulong senderSteamId)
     {
-        if (!TryGetHostSteamId(out ulong hostId) || sender.m_SteamID != hostId)
+        if (!TryGetHostSteamId(out ulong hostId) || senderSteamId != hostId)
         {
-            MiddlemanMod.Log.Warning($"Ignored '{msgType}' from non-host SteamID {sender.m_SteamID}.");
+            MiddlemanMod.Log.Warning($"Ignored '{msgType}' from non-host SteamID {senderSteamId}.");
             return;
         }
 
@@ -419,26 +504,185 @@ internal static class MiddlemanNetwork
         }
     }
 
-    private static bool IsAuthorizedLobbyMember(CSteamID sender)
+    private static bool IsAuthorizedLobbyMember(ulong senderSteamId)
     {
-        if (_client == null || sender.m_SteamID == 0 || sender.m_SteamID == _client.LocalPlayerId64)
+        if (_backend == null || senderSteamId == 0 || senderSteamId == _backend.LocalPlayerId64)
         {
             return false;
         }
 
-        if (_client.IsInLobby)
+        if (_backend.IsInLobby)
         {
-            return _client.TryGetMember(sender.m_SteamID, out _);
+            return _backend.TryGetLobbyMember(senderSteamId);
         }
 
         if (Singleton<Lobby>.InstanceExists && Singleton<Lobby>.Instance.IsInLobby)
         {
             var members = Singleton<Lobby>.Instance.GetLobbyMemberIDs();
-            return members != null && members.Contains(sender.m_SteamID.ToString());
+            return members != null && members.Contains(senderSteamId.ToString());
         }
 
         return false;
     }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static ISyncBackend? CreateAndInitBackend(out string? errorMessage)
+    {
+        var backend = new SteamBackend();
+        if (backend.Initialize(out errorMessage))
+        {
+            return backend;
+        }
+
+        backend.Dispose();
+        return null;
+    }
+
+    private sealed class SteamBackend : ISyncBackend
+    {
+        private readonly SteamNetworkClient _client = new(new NetworkRules
+        {
+            EnableRelay = true,
+            AcceptOnlyFriends = false
+        });
+
+        public bool IsInLobby => _client.IsInLobby;
+        public ulong HostPlayerId64 => _client.HostPlayerId64;
+        public ulong LocalPlayerId64 => _client.LocalPlayerId64;
+
+        public bool Initialize(out string? errorMessage)
+        {
+            if (!_client.TryInitialize(out SteamNetworkException? error))
+            {
+                errorMessage = error?.Message;
+                return false;
+            }
+
+            errorMessage = null;
+            _client.RegisterMessageHandler<TextMessage>(OnTextMessageReceived);
+            return true;
+        }
+
+        public void ProcessIncoming()
+        {
+            if (!_client.IsInitialized)
+            {
+                return;
+            }
+
+            _client.ProcessIncomingMessages();
+        }
+
+        public void Dispose()
+        {
+            _client.Dispose();
+        }
+
+        public void SendText(ulong targetSteamId, string wire)
+        {
+            if (!_client.IsInitialized || targetSteamId == 0)
+            {
+                return;
+            }
+
+            ObserveSend(_client.SendTextMessageAsync(new CSteamID(targetSteamId), wire));
+        }
+
+        public void BroadcastText(string wire)
+        {
+            if (!_client.IsInitialized)
+            {
+                return;
+            }
+
+            _client.BroadcastTextMessage(wire);
+        }
+
+        public bool TryGetLobbyMember(ulong steamId)
+        {
+            return _client.TryGetMember(steamId, out _);
+        }
+
+        private static void OnTextMessageReceived(TextMessage message, CSteamID sender)
+        {
+            if (message == null || string.IsNullOrEmpty(message.Content))
+            {
+                return;
+            }
+
+            OnWireMessageReceived(message.Content, sender.m_SteamID);
+        }
+
+        private static void ObserveSend(Task<bool> sendTask)
+        {
+            sendTask.ContinueWith(
+                t =>
+                {
+                    if (t.IsFaulted && t.Exception != null)
+                    {
+                        MiddlemanMod.Log.Warning($"Co-op P2P send failed: {t.Exception.GetBaseException().Message}");
+                    }
+                },
+                TaskScheduler.Default);
+        }
+    }
+
+    private static string SanitizeField(string? value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return string.Empty;
+        }
+
+        return value
+            .Replace("|", "/")
+            .Replace("\"", "'")
+            .Replace("\\", "/")
+            .Replace("\r", " ")
+            .Replace("\n", " ");
+    }
+#else
+    public static bool IsAvailable => false;
+
+    public static void Initialize() { }
+
+    public static void Update() { }
+
+    public static void Dispose() { }
+
+    public static void RequestStateSyncIfClient() { }
+
+    public static void SendPassOffer(Customer customer)
+    {
+        MiddlemanController.Notify("Middleman", "Co-op actions require SteamNetworkLib in UserLibs\\.");
+    }
+
+    public static void SendPassAccepted(Customer customer)
+    {
+        MiddlemanController.Notify("Middleman", "Co-op actions require SteamNetworkLib in UserLibs\\.");
+    }
+
+    public static void SendSummonDealer(Dealer dealer, Property property)
+    {
+        MiddlemanController.Notify("Middleman", "Co-op actions require SteamNetworkLib in UserLibs\\.");
+    }
+
+    public static void SendCancelMeetup(Dealer dealer)
+    {
+        MiddlemanController.Notify("Middleman", "Co-op actions require SteamNetworkLib in UserLibs\\.");
+    }
+
+    public static void SendCheckStatus(Dealer dealer)
+    {
+        MiddlemanController.Notify("Middleman", "Co-op actions require SteamNetworkLib in UserLibs\\.");
+    }
+
+    public static void SendToastToClient(ulong targetSteamId, string title, string subtitle) { }
+
+    public static void BroadcastContractAssigned(string contractGuid, string dealerId) { }
+
+    public static void BroadcastMeetupState(string dealerId, bool active, ulong? targetSteamId = null) { }
+#endif
 
     internal static Customer? FindCustomerByNpcId(string npcId)
     {
@@ -541,20 +785,5 @@ internal static class MiddlemanNetwork
         return !string.IsNullOrEmpty(property.PropertyCode)
             ? property.PropertyCode
             : property.PropertyName;
-    }
-
-    private static string SanitizeField(string? value)
-    {
-        if (string.IsNullOrEmpty(value))
-        {
-            return string.Empty;
-        }
-
-        return value
-            .Replace("|", "/")
-            .Replace("\"", "'")
-            .Replace("\\", "/")
-            .Replace("\r", " ")
-            .Replace("\n", " ");
     }
 }
